@@ -243,12 +243,12 @@ export default function Home() {
           </p>
         </header>
 
-        <div className="grid lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-lg shadow">
+        <div className="lg:grid lg:grid-cols-2 gap-6">
+          <div className="bg-white p-6 rounded-lg shadow h-fit">
             <NDAForm formData={formData} onChange={handleFormChange} />
           </div>
 
-          <div className="bg-white p-6 rounded-lg shadow flex flex-col">
+          <div className="bg-white p-6 rounded-lg shadow">
             <div className="flex justify-between items-center mb-4">
               <h2 className="text-xl font-semibold text-gray-900">Document Preview</h2>
               <button
@@ -258,10 +258,7 @@ export default function Home() {
                 Download PDF
               </button>
             </div>
-            <div
-              className="flex-1 overflow-auto bg-white p-4 border border-gray-200 rounded"
-              style={{ maxHeight: "70vh" }}
-            >
+            <div className="bg-white border border-gray-200 rounded">
               <NDAPreview data={formData} />
             </div>
           </div>
