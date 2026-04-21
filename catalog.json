@@ -1,0 +1,57 @@
+[
+  {
+    "name": "Mutual NDA",
+    "description": "Common Paper standard Mutual Non-Disclosure Agreement for protecting confidential information between two parties.",
+    "filename": "mutual_nda.md"
+  },
+  {
+    "name": "Mutual NDA Cover Page",
+    "description": "Cover page template for the Mutual Non-Disclosure Agreement with customizable fields.",
+    "filename": "mutual_nda_coverpage.md"
+  },
+  {
+    "name": "Cloud Service Agreement (CSA)",
+    "description": "Common Paper standard Cloud Service Agreement for SaaS products and cloud services.",
+    "filename": "csa.md"
+  },
+  {
+    "name": "Design Partner Agreement",
+    "description": "Agreement for companies partnering on product design and development with early access programs.",
+    "filename": "design_partner_agreement.md"
+  },
+  {
+    "name": "Service Level Agreement (SLA)",
+    "description": "Standard SLA defining uptime guarantees, response times, and service credits.",
+    "filename": "sla.md"
+  },
+  {
+    "name": "Data Processing Agreement (DPA)",
+    "description": "Agreement governing the processing of personal data in compliance with GDPR and other data protection laws.",
+    "filename": "dpa.md"
+  },
+  {
+    "name": "Professional Services Agreement (PSA)",
+    "description": "Agreement for professional services engagements including statements of work.",
+    "filename": "psa.md"
+  },
+  {
+    "name": "Pilot Agreement",
+    "description": "Agreement for pilot programs allowing customers to evaluate a product before committing.",
+    "filename": "pilot_agreement.md"
+  },
+  {
+    "name": "Partnership Agreement",
+    "description": "Agreement for business partnerships including trademark licensing and joint marketing.",
+    "filename": "partnership_agreement.md"
+  },
+  {
+    "name": "Software License Agreement",
+    "description": "Agreement for licensing software products with usage rights and restrictions.",
+    "filename": "software_license_agreement.md"
+  },
+  {
+    "name": "Business Associate Agreement (BAA)",
+    "description": "HIPAA-compliant agreement for business associates handling protected health information.",
+    "filename": "baa.md"
+  }
+]
