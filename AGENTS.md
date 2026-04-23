@@ -4,7 +4,7 @@
 
 This is a SaaS product to allow users to draft legal agreements based on templates in the templates directory.
 The user can carry out AI chat to fill in agreement fields.
-At present, AI chat is implemented for Mutual NDA only.
+AI chat is implemented for catalog-driven document drafting via `/api/chat/document-session`, including supported-template selection, field collection, draft preview, and PDF download.
 The available documents are covered in the catalog.json file in the project root, included here:
 
 @catalog.json
@@ -76,20 +76,31 @@ Backend available at http://localhost:8000
 - Static file mount serves the Next.js export from `/app/static` (fallback for all non-API routes).
 - `/api/health` — health check endpoint.
 - `/api/chat/completions` — generic LiteLLM proxy to OpenRouter.
-- `/api/chat/nda-session` — structured Mutual NDA chat endpoint (Pydantic-validated JSON with `model_validate_json`) that updates NDA form fields and tracks missing fields / review readiness.
+- `/api/chat/nda-session` — legacy structured Mutual NDA endpoint (still available).
+- `/api/chat/document-session` — primary structured multi-document endpoint:
+	- Normalizes document selection from user intent and aliases.
+	- Collects fields, computes missing fields, and determines draft readiness.
+	- Renders draft output from `templates/` with cleaned markdown sections and a formatted collected-data block.
+	- Supports unsupported-document handling with closest-match suggestion.
+	- Uses free OpenRouter models with automatic fallback to additional free models.
+	- If all model calls fail/rate-limit, falls back to deterministic `local-fallback` question flow.
+	- Includes guardrails against false alias substring matches (e.g. words containing `sla`).
 
 ### Frontend (`frontend/`)
 - Next.js 16 with Tailwind CSS, TypeScript, static export (`output: "export"`).
 - **`AuthContext`** — simple fake auth: `isLoggedIn` flag stored in `sessionStorage`. No real credentials or API calls.
 - **Login page** (`/login`) — single "Continue without signing in" button; calls `login()` then routes to `/`.
 - **`AuthProvider`** wraps the whole app in `layout.tsx`.
-- Home page now uses a freeform **AI chat** panel for Mutual NDA intake.
+- Home page uses a freeform **AI chat** panel for catalog-based document intake.
 - Chat supports Enter-to-send, Shift+Enter for newline, and auto-scroll to newest message.
-- Chat replies update NDA field state in real-time and drive the live `NDAPreview` + PDF export.
-- Existing **NDAForm** + **NDAPreview** components remain in the codebase; preview is actively used in the current flow.
+- Chat composer is auto-focused so users can continuously type answers without re-clicking the field.
+- Chat replies update document field state in real time and drive the draft preview + PDF export.
+- Draft preview renders markdown + table-formatted collected inputs.
+- PDF export handles collected-input table content and strips raw HTML artifacts.
+- Existing **NDAForm** + **NDAPreview** components remain in the codebase as legacy components; current flow uses chat-driven preview.
 - Vitest unit tests in place for `NDAForm`, `NDAPreview`, and `dateUtils`.
 
 ### Not yet implemented
 - Real user authentication (sign up / sign in with hashed passwords + JWT).
-- AI chat flow for document selection across multiple agreement types (currently Mutual NDA only).
-- Support for documents beyond Mutual NDA.
+- Full per-document bespoke required-field schemas for every catalog template (some documents still use generic fallback fields).
+- Persistent user sessions/history for document chat runs.
