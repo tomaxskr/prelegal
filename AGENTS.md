@@ -8,7 +8,7 @@ The available documents are covered in the catalog.json file in the project root
 
 @catalog.json
 
-Before we start: the initial implementation is a frontend-only prototype that only supports the Mutual NDA document with no AI chat.
+The initial prototype was frontend-only with no AI chat. V1 foundation is now in place (see "Current implementation status" below).
 
 ## Development process
 
@@ -36,7 +36,7 @@ The entire project should be packaged into a Docker container.
 The backend should be in backend/ and be a uv project, using FastAPI.  
 The frontend should be in frontend/   
 The database should use SQLLite and be created from scratch each time the Docker container is brought up, allowing for a users table with sign up and sign in.  
-Consider statically building the frontend and serving it via FastAPI, if that will work.  
+The frontend is statically exported by Next.js (`output: "export"`) and served by FastAPI. All traffic goes to `http://localhost:8000` — no separate frontend port.  
 There should be scripts in scripts/ for:  
 ```bash
 # Mac
@@ -59,3 +59,32 @@ Backend available at http://localhost:8000
 - Purple Secondary: `#753991` (submit buttons)
 - Dark Navy: `#032147` (headings)
 - Gray Text: `#888888`
+
+## Current implementation status
+
+### Infrastructure (complete)
+- **Single Docker container** — multi-stage build: Node.js compiles the Next.js static export, then Python/FastAPI serves it. One service, one port (`8000`).
+- **docker-compose.yml** — single `app` service with a named volume `prelegal_data` mounted at `/data` for the SQLite database.
+- **Scripts** — start/stop scripts in place for Windows, Mac, and Linux (all using `docker-compose`).
+- **`.env`** — file exists at project root with `OPENROUTER_API_KEY` placeholder (git-ignored).
+
+### Backend (`backend/`)
+- FastAPI with `uvicorn`, uv project (`pyproject.toml`).
+- **SQLite** initialised on startup via `init_db()` — creates `/data/prelegal.db` and a `users` table fresh each container start.
+- CORS middleware configured for `localhost:3000` and `localhost:8000`.
+- Static file mount serves the Next.js export from `/app/static` (fallback for all non-API routes).
+- `/api/health` — health check endpoint.
+- `/api/chat/completions` — LiteLLM proxy to OpenRouter (stubbed; no auth guard yet).
+
+### Frontend (`frontend/`)
+- Next.js 16 with Tailwind CSS, TypeScript, static export (`output: "export"`).
+- **`AuthContext`** — simple fake auth: `isLoggedIn` flag stored in `sessionStorage`. No real credentials or API calls.
+- **Login page** (`/login`) — single "Continue without signing in" button; calls `login()` then routes to `/`.
+- **`AuthProvider`** wraps the whole app in `layout.tsx`.
+- Existing **NDAForm** + **NDAPreview** components retained unchanged (Mutual NDA only, no AI chat yet).
+- Vitest unit tests in place for `NDAForm`, `NDAPreview`, and `dateUtils`.
+
+### Not yet implemented
+- Real user authentication (sign up / sign in with hashed passwords + JWT).
+- AI chat flow for document selection and field population.
+- Support for documents beyond Mutual NDA.
