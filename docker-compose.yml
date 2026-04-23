@@ -1,0 +1,17 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - DATABASE_PATH=/data/prelegal.db
+      - STATIC_DIR=/app/static
+    volumes:
+      - prelegal_data:/data
+    restart: unless-stopped
+
+volumes:
+  prelegal_data:

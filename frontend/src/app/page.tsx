@@ -5,7 +5,7 @@ import NDAForm, { NDAFormData, getEmptyFormData } from "@/components/NDAForm";
 import NDAPreview from "@/components/NDAPreview";
 import jsPDF from "jspdf";
 
-export default function Home() {
+export default function HomePage() {
   const [formData, setFormData] = useState<NDAFormData>(getEmptyFormData());
 
   const handleFormChange = (data: NDAFormData) => {
@@ -233,15 +233,31 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-gray-100 py-6 px-4">
+      <header className="bg-white border-b border-gray-200 mb-6">
+        <div className="max-w-7xl mx-auto py-4 px-4 flex justify-between items-center">
+          <div>
+            <h1 className="text-xl font-bold text-[--dark-navy]">Prelegal</h1>
+          </div>
+          <div className="flex items-center gap-4">
+            <a
+              href="/login"
+              className="text-sm text-gray-500 hover:text-gray-700"
+            >
+              Sign in
+            </a>
+          </div>
+        </div>
+      </header>
+
       <div className="max-w-7xl mx-auto">
-        <header className="text-center mb-6">
-          <h1 className="text-3xl font-bold text-gray-900 mb-1">
+        <div className="text-center mb-6">
+          <h2 className="text-3xl font-bold text-gray-900 mb-1">
             Mutual NDA Creator
-          </h1>
+          </h2>
           <p className="text-gray-600 text-sm">
             Fill in the form and see your document update in real-time
           </p>
-        </header>
+        </div>
 
         <div className="lg:grid lg:grid-cols-2 gap-6">
           <div className="bg-white p-6 rounded-lg shadow h-fit">
