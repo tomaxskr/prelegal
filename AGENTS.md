@@ -3,7 +3,8 @@
 ## Overview
 
 This is a SaaS product to allow users to draft legal agreements based on templates in the templates directory.
-The user can carry out AI chat in order to establish what document they want and how to fill in the fields.
+The user can carry out AI chat to fill in agreement fields.
+At present, AI chat is implemented for Mutual NDA only.
 The available documents are covered in the catalog.json file in the project root, included here:
 
 @catalog.json
@@ -74,17 +75,21 @@ Backend available at http://localhost:8000
 - CORS middleware configured for `localhost:3000` and `localhost:8000`.
 - Static file mount serves the Next.js export from `/app/static` (fallback for all non-API routes).
 - `/api/health` — health check endpoint.
-- `/api/chat/completions` — LiteLLM proxy to OpenRouter (stubbed; no auth guard yet).
+- `/api/chat/completions` — generic LiteLLM proxy to OpenRouter.
+- `/api/chat/nda-session` — structured Mutual NDA chat endpoint (Pydantic-validated JSON with `model_validate_json`) that updates NDA form fields and tracks missing fields / review readiness.
 
 ### Frontend (`frontend/`)
 - Next.js 16 with Tailwind CSS, TypeScript, static export (`output: "export"`).
 - **`AuthContext`** — simple fake auth: `isLoggedIn` flag stored in `sessionStorage`. No real credentials or API calls.
 - **Login page** (`/login`) — single "Continue without signing in" button; calls `login()` then routes to `/`.
 - **`AuthProvider`** wraps the whole app in `layout.tsx`.
-- Existing **NDAForm** + **NDAPreview** components retained unchanged (Mutual NDA only, no AI chat yet).
+- Home page now uses a freeform **AI chat** panel for Mutual NDA intake.
+- Chat supports Enter-to-send, Shift+Enter for newline, and auto-scroll to newest message.
+- Chat replies update NDA field state in real-time and drive the live `NDAPreview` + PDF export.
+- Existing **NDAForm** + **NDAPreview** components remain in the codebase; preview is actively used in the current flow.
 - Vitest unit tests in place for `NDAForm`, `NDAPreview`, and `dateUtils`.
 
 ### Not yet implemented
 - Real user authentication (sign up / sign in with hashed passwords + JWT).
-- AI chat flow for document selection and field population.
+- AI chat flow for document selection across multiple agreement types (currently Mutual NDA only).
 - Support for documents beyond Mutual NDA.
