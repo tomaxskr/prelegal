@@ -1,15 +1,118 @@
 "use client";
 
-import { useState } from "react";
-import NDAForm, { NDAFormData, getEmptyFormData } from "@/components/NDAForm";
+import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { NDAFormData, getEmptyFormData } from "@/components/NDAForm";
 import NDAPreview from "@/components/NDAPreview";
 import jsPDF from "jspdf";
 
+interface ChatMessage {
+  role: "assistant" | "user";
+  content: string;
+}
+
+interface NDAChatSessionResponse {
+  assistantMessage: string;
+  formData: NDAFormData;
+  missingFields: string[];
+  readyForReview: boolean;
+  model: string;
+}
+
 export default function HomePage() {
   const [formData, setFormData] = useState<NDAFormData>(getEmptyFormData());
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    {
+      role: "assistant",
+      content:
+        "I can help draft a Mutual NDA. Tell me what this NDA is for, and I will ask follow-up questions to fill all required fields.",
+    },
+  ]);
+  const [pendingMessage, setPendingMessage] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+  const [isReadyForReview, setIsReadyForReview] = useState(false);
+  const [activeModel, setActiveModel] = useState("");
+  const [chatError, setChatError] = useState<string | null>(null);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-  const handleFormChange = (data: NDAFormData) => {
-    setFormData(data);
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [chatMessages, isSending]);
+
+  const submitPendingMessage = async (message: string, updatedMessages: ChatMessage[]) => {
+    setPendingMessage("");
+    setChatMessages(updatedMessages);
+    setIsSending(true);
+    setChatError(null);
+
+    try {
+      const response = await fetch("/api/chat/nda-session", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          messages: updatedMessages,
+          currentForm: formData,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Chat request failed with status ${response.status}`);
+      }
+
+      const payload = (await response.json()) as NDAChatSessionResponse;
+      setFormData(payload.formData);
+      setMissingFields(payload.missingFields);
+      setIsReadyForReview(payload.readyForReview);
+      setActiveModel(payload.model);
+      setChatMessages((previous) => [
+        ...previous,
+        { role: "assistant", content: payload.assistantMessage },
+      ]);
+    } catch (error) {
+      const fallbackError =
+        error instanceof Error ? error.message : "Unexpected error while contacting AI";
+      setChatError(fallbackError);
+      setChatMessages((previous) => [
+        ...previous,
+        {
+          role: "assistant",
+          content:
+            "I could not process that message right now. Please try again and I will continue collecting your Mutual NDA details.",
+        },
+      ]);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  const handleSendMessage = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const message = pendingMessage.trim();
+    if (!message || isSending) {
+      return;
+    }
+
+    const updatedMessages = [...chatMessages, { role: "user" as const, content: message }];
+    await submitPendingMessage(message, updatedMessages);
+  };
+
+  const handleComposerKeyDown = async (
+    event: KeyboardEvent<HTMLTextAreaElement>
+  ) => {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    event.preventDefault();
+    const message = pendingMessage.trim();
+    if (!message || isSending) {
+      return;
+    }
+
+    const updatedMessages = [...chatMessages, { role: "user" as const, content: message }];
+    await submitPendingMessage(message, updatedMessages);
   };
 
   const handleDownloadPdf = () => {
@@ -255,13 +358,72 @@ export default function HomePage() {
             Mutual NDA Creator
           </h2>
           <p className="text-gray-600 text-sm">
-            Fill in the form and see your document update in real-time
+            Chat with AI and watch your Mutual NDA update in real-time
           </p>
         </div>
 
         <div className="lg:grid lg:grid-cols-2 gap-6">
           <div className="bg-white p-6 rounded-lg shadow h-fit">
-            <NDAForm formData={formData} onChange={handleFormChange} />
+            <div className="mb-4">
+              <h3 className="text-xl font-semibold text-gray-900">AI Chat</h3>
+              <p className="text-sm text-gray-600 mt-1">
+                This assistant currently supports Mutual NDA only.
+              </p>
+            </div>
+
+            <div className="border border-gray-200 rounded-md p-3 h-[420px] overflow-y-auto bg-gray-50 space-y-3">
+              {chatMessages.map((message, index) => (
+                <div
+                  key={`${message.role}-${index}`}
+                  className={`max-w-[90%] rounded-md px-3 py-2 text-sm ${
+                    message.role === "assistant"
+                      ? "bg-white border border-gray-200 text-gray-800"
+                      : "ml-auto bg-[var(--blue-primary)] text-white"
+                  }`}
+                >
+                  {message.content}
+                </div>
+              ))}
+              {isSending && (
+                <div className="max-w-[90%] rounded-md px-3 py-2 text-sm bg-white border border-gray-200 text-gray-500">
+                  Thinking...
+                </div>
+              )}
+              <div ref={chatEndRef} />
+            </div>
+
+            <form onSubmit={handleSendMessage} className="mt-4 space-y-3">
+              <textarea
+                value={pendingMessage}
+                onChange={(event) => setPendingMessage(event.target.value)}
+                onKeyDown={handleComposerKeyDown}
+                placeholder="Describe your NDA details in your own words..."
+                className="w-full p-3 border border-gray-300 rounded-md h-24 text-gray-900"
+                disabled={isSending}
+              />
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs text-gray-500">Press Enter to send. Use Shift+Enter for a new line.</p>
+                <button
+                  type="submit"
+                  className="px-5 py-2.5 bg-[var(--purple-secondary)] text-white rounded hover:opacity-90 font-semibold text-sm disabled:opacity-60 shadow-sm"
+                  disabled={isSending || !pendingMessage.trim()}
+                  aria-label="Send message"
+                >
+                  {isSending ? "Sending..." : "Send"}
+                </button>
+                {activeModel && (
+                  <p className="text-xs text-gray-500 text-right">Model: {activeModel}</p>
+                )}
+              </div>
+            </form>
+
+            <div className="mt-4 border-t border-gray-200 pt-3 text-sm text-gray-700 space-y-1">
+              <p>
+                Status: {isReadyForReview ? "Ready for review" : "Collecting details"}
+              </p>
+              <p>Missing fields: {missingFields.length}</p>
+              {chatError && <p className="text-red-600">Error: {chatError}</p>}
+            </div>
           </div>
 
           <div className="bg-white p-6 rounded-lg shadow">
