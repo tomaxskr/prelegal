@@ -7,7 +7,7 @@ describe('formatDate', () => {
   });
 
   it('returns "[Date]" for undefined', () => {
-    expect(formatDate(undefined as any)).toBe('[Date]');
+    expect(formatDate(undefined)).toBe('[Date]');
   });
 
   it('formats valid date correctly', () => {

@@ -71,10 +71,18 @@ Backend available at http://localhost:8000
 
 ### Backend (`backend/`)
 - FastAPI with `uvicorn`, uv project (`pyproject.toml`).
-- **SQLite** initialised on startup via `init_db()` — creates `/data/prelegal.db` and a `users` table fresh each container start.
+- **SQLite** initialised on startup via `init_db()` — DB is recreated fresh on each backend start (ephemeral by design for this prototype).
 - CORS middleware configured for `localhost:3000` and `localhost:8000`.
 - Static file mount serves the Next.js export from `/app/static` (fallback for all non-API routes).
 - `/api/health` — health check endpoint.
+- Authentication/session endpoints:
+	- `/api/auth/signup`
+	- `/api/auth/signin`
+	- `/api/auth/me`
+	- `/api/auth/signout`
+- Saved document history endpoints (scoped to authenticated user):
+	- `/api/documents` (POST save, GET list)
+	- `/api/documents/{document_id}` (GET detail)
 - `/api/chat/completions` — generic LiteLLM proxy to OpenRouter.
 - `/api/chat/nda-session` — legacy structured Mutual NDA endpoint (still available).
 - `/api/chat/document-session` — primary structured multi-document endpoint:
@@ -88,19 +96,22 @@ Backend available at http://localhost:8000
 
 ### Frontend (`frontend/`)
 - Next.js 16 with Tailwind CSS, TypeScript, static export (`output: "export"`).
-- **`AuthContext`** — simple fake auth: `isLoggedIn` flag stored in `sessionStorage`. No real credentials or API calls.
-- **Login page** (`/login`) — single "Continue without signing in" button; calls `login()` then routes to `/`.
+- **`AuthContext`** — API-backed auth with token persistence in `localStorage`, session restore via `/api/auth/me`, and sign-out via `/api/auth/signout`.
+- **Login page** (`/login`) — professional sign in/sign up form flow backed by `/api/auth/signin` and `/api/auth/signup`.
 - **`AuthProvider`** wraps the whole app in `layout.tsx`.
 - Home page uses a freeform **AI chat** panel for catalog-based document intake.
 - Chat supports Enter-to-send, Shift+Enter for newline, and auto-scroll to newest message.
 - Chat composer is auto-focused so users can continuously type answers without re-clicking the field.
 - Chat replies update document field state in real time and drive the draft preview + PDF export.
+- Authenticated users can save generated drafts and reload prior drafts from a history panel.
 - Draft preview renders markdown + table-formatted collected inputs.
 - PDF export handles collected-input table content and strips raw HTML artifacts.
+- Legal disclaimer is shown on auth and drafting screens, clarifying that outputs are drafts subject to legal review.
 - Existing **NDAForm** + **NDAPreview** components remain in the codebase as legacy components; current flow uses chat-driven preview.
 - Vitest unit tests in place for `NDAForm`, `NDAPreview`, and `dateUtils`.
+- Additional backend integration tests cover auth and per-user document history.
 
 ### Not yet implemented
-- Real user authentication (sign up / sign in with hashed passwords + JWT).
+- JWT-based auth (current implementation uses server-side session tokens stored in SQLite).
 - Full per-document bespoke required-field schemas for every catalog template (some documents still use generic fallback fields).
-- Persistent user sessions/history for document chat runs.
+- Persistence of users/sessions/history across backend restarts (current DB is intentionally reset each startup).

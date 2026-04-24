@@ -1,10 +1,12 @@
 "use client";
 
-import { FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeRaw from "rehype-raw";
 import jsPDF from "jspdf";
+import { useAuth } from "@/context/AuthContext";
 
 interface ChatMessage {
   role: "assistant" | "user";
@@ -24,7 +26,32 @@ interface DocumentChatSessionResponse {
   model: string;
 }
 
+interface SavedDocumentSummary {
+  id: number;
+  selectedDocument: string;
+  createdAt: string;
+}
+
+interface SavedDocumentDetail {
+  id: number;
+  selectedDocument: string;
+  collectedFields: Record<string, string>;
+  draftMarkdown: string;
+  createdAt: string;
+}
+
+interface PdfTableRow {
+  label: string;
+  value: string;
+}
+
+const INITIAL_ASSISTANT_MESSAGE =
+  "I can help draft legal documents from our supported template catalog. Tell me what document you want (for example: Mutual NDA, CSA, DPA, PSA, Pilot Agreement, SLA, BAA, Partnership Agreement, Software License Agreement, or Design Partner Agreement).";
+
 export default function HomePage() {
+  const router = useRouter();
+  const { isLoggedIn, isAuthLoading, user, authToken, logout } = useAuth();
+
   const [selectedDocument, setSelectedDocument] = useState<string | null>(null);
   const [collectedFields, setCollectedFields] = useState<Record<string, string>>({});
   const [draftMarkdown, setDraftMarkdown] = useState("");
@@ -32,11 +59,7 @@ export default function HomePage() {
   const [suggestedClosestDocument, setSuggestedClosestDocument] = useState<string | null>(null);
   const [isDocumentSupported, setIsDocumentSupported] = useState(true);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      role: "assistant",
-      content:
-        "I can help draft legal documents from our supported template catalog. Tell me what document you want (for example: Mutual NDA, CSA, DPA, PSA, Pilot Agreement, SLA, BAA, Partnership Agreement, Software License Agreement, or Design Partner Agreement).",
-    },
+    { role: "assistant", content: INITIAL_ASSISTANT_MESSAGE },
   ]);
   const [pendingMessage, setPendingMessage] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -44,13 +67,28 @@ export default function HomePage() {
   const [isReadyForDraft, setIsReadyForDraft] = useState(false);
   const [activeModel, setActiveModel] = useState("");
   const [chatError, setChatError] = useState<string | null>(null);
+  const [savedDocuments, setSavedDocuments] = useState<SavedDocumentSummary[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+  const [isSavingDocument, setIsSavingDocument] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const normalizedDraftMarkdown = draftMarkdown
-    .replace(/<span[^>]*>/gi, "")
-    .replace(/<\/span>/gi, "")
-    .replace(/âs/g, "'s");
+  const normalizedDraftMarkdown = useMemo(
+    () =>
+      draftMarkdown
+        .replace(/<span[^>]*>/gi, "")
+        .replace(/<\/span>/gi, "")
+        .replace(/âs/g, "'s"),
+    [draftMarkdown]
+  );
+
+  useEffect(() => {
+    if (!isAuthLoading && !isLoggedIn) {
+      router.replace("/login");
+    }
+  }, [isAuthLoading, isLoggedIn, router]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -61,6 +99,47 @@ export default function HomePage() {
       composerRef.current?.focus();
     }
   }, [isSending, chatMessages.length]);
+
+  const fetchSavedDocuments = useCallback(async () => {
+    if (!authToken) {
+      setSavedDocuments([]);
+      return;
+    }
+
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    try {
+      const response = await fetch("/api/documents", {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`History request failed with status ${response.status}`);
+      }
+      const payload = (await response.json()) as SavedDocumentSummary[];
+      setSavedDocuments(payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load document history";
+      setHistoryError(message);
+    } finally {
+      setIsHistoryLoading(false);
+    }
+  }, [authToken]);
+
+  useEffect(() => {
+    if (!(authToken && isLoggedIn)) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      void fetchSavedDocuments();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [authToken, isLoggedIn, fetchSavedDocuments]);
 
   const submitPendingMessage = async (updatedMessages: ChatMessage[]) => {
     setPendingMessage("");
@@ -132,9 +211,7 @@ export default function HomePage() {
     await submitPendingMessage(updatedMessages);
   };
 
-  const handleComposerKeyDown = async (
-    event: KeyboardEvent<HTMLTextAreaElement>
-  ) => {
+  const handleComposerKeyDown = async (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== "Enter" || event.shiftKey) {
       return;
     }
@@ -148,8 +225,6 @@ export default function HomePage() {
     const updatedMessages = [...chatMessages, { role: "user" as const, content: message }];
     await submitPendingMessage(updatedMessages);
   };
-
-  interface PdfTableRow { label: string; value: string; }
 
   const extractHtmlTableRows = (text: string): { result: string; tables: PdfTableRow[][] } => {
     const tables: PdfTableRow[][] = [];
@@ -187,6 +262,7 @@ export default function HomePage() {
     if (!normalizedDraftMarkdown) {
       return;
     }
+
     const doc = new jsPDF({ unit: "pt", format: "a4" });
     const margin = 32;
     const pageWidth = doc.internal.pageSize.getWidth();
@@ -275,7 +351,7 @@ export default function HomePage() {
       segment.replace(/<[^>]+>/g, "").split("\n").forEach(renderLine);
       if (tableIndex < tables.length) {
         renderTableRows(tables[tableIndex]);
-        tableIndex++;
+        tableIndex += 1;
       }
     }
 
@@ -290,158 +366,290 @@ export default function HomePage() {
     doc.save(`${fileName || "document"}.pdf`);
   };
 
+  const handleSaveDraft = async () => {
+    if (!authToken || !selectedDocument || !draftMarkdown || isSavingDocument) {
+      return;
+    }
+
+    setIsSavingDocument(true);
+    setHistoryError(null);
+    try {
+      const response = await fetch("/api/documents", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authToken}`,
+        },
+        body: JSON.stringify({
+          selectedDocument,
+          collectedFields,
+          draftMarkdown,
+        }),
+      });
+
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as
+          | { detail?: string }
+          | null;
+        throw new Error(payload?.detail || "Unable to save document");
+      }
+
+      await fetchSavedDocuments();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to save document";
+      setHistoryError(message);
+    } finally {
+      setIsSavingDocument(false);
+    }
+  };
+
+  const loadSavedDocument = async (documentId: number) => {
+    if (!authToken) {
+      return;
+    }
+
+    setHistoryError(null);
+    try {
+      const response = await fetch(`/api/documents/${documentId}`, {
+        headers: {
+          Authorization: `Bearer ${authToken}`,
+        },
+      });
+      if (!response.ok) {
+        throw new Error("Unable to load selected document");
+      }
+
+      const payload = (await response.json()) as SavedDocumentDetail;
+      setSelectedDocument(payload.selectedDocument);
+      setCollectedFields(payload.collectedFields);
+      setDraftMarkdown(payload.draftMarkdown);
+      setMissingFields([]);
+      setIsReadyForDraft(true);
+      setChatMessages([
+        { role: "assistant", content: INITIAL_ASSISTANT_MESSAGE },
+        {
+          role: "assistant",
+          content: `Loaded saved draft #${payload.id} (${payload.selectedDocument}) from your history.`,
+        },
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to load selected document";
+      setHistoryError(message);
+    }
+  };
+
+  if (isAuthLoading || !isLoggedIn) {
+    return (
+      <main className="min-h-screen bg-slate-950 text-slate-200 grid place-items-center px-4">
+        <p className="text-sm">Loading workspace...</p>
+      </main>
+    );
+  }
+
   return (
-    <main className="min-h-screen bg-gray-100 py-6 px-4">
-      <header className="bg-white border-b border-gray-200 mb-6">
-        <div className="max-w-7xl mx-auto py-4 px-4 flex justify-between items-center">
-          <div>
-            <h1 className="text-xl font-bold text-[--dark-navy]">Prelegal</h1>
+    <main className="min-h-screen bg-[radial-gradient(circle_at_10%_10%,_#dbeafe_0%,_#f8fafc_45%,_#e2e8f0_100%)] px-4 py-6">
+      <header className="mx-auto mb-5 flex w-full max-w-7xl items-center justify-between rounded-2xl border border-slate-200 bg-white/85 px-5 py-4 shadow-sm backdrop-blur">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight text-[--dark-navy]">Prelegal</h1>
+          <p className="text-xs text-slate-600">AI-assisted legal drafting workspace</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="rounded-full bg-slate-100 px-3 py-1.5 text-xs text-slate-700">
+            {user?.name || user?.email}
           </div>
-          <div className="flex items-center gap-4">
-            <a
-              href="/login"
-              className="text-sm text-gray-500 hover:text-gray-700"
-            >
-              Sign in
-            </a>
-          </div>
+          <button
+            onClick={() => {
+              void logout();
+              router.push("/login");
+            }}
+            className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100"
+          >
+            Sign out
+          </button>
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto">
-        <div className="text-center mb-6">
-          <h2 className="text-3xl font-bold text-gray-900 mb-1">
-            Legal Document Creator
-          </h2>
-          <p className="text-gray-600 text-sm">
-            Chat with AI to choose a supported template and build your document draft
-          </p>
-        </div>
+      <section className="mx-auto mb-5 w-full max-w-7xl rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        Disclaimer: Documents generated here are draft materials only and are subject to legal review by qualified counsel.
+      </section>
 
-        <div className="lg:grid lg:grid-cols-2 gap-6">
-          <div className="bg-white p-6 rounded-lg shadow h-fit">
-            <div className="mb-4">
-              <h3 className="text-xl font-semibold text-gray-900">AI Chat</h3>
-              <p className="text-sm text-gray-600 mt-1">
-                If a document type is unsupported, AI will suggest the closest template we can generate.
-              </p>
-            </div>
-
-            <div className="border border-gray-200 rounded-md p-3 h-[420px] overflow-y-auto bg-gray-50 space-y-3">
-              {chatMessages.map((message, index) => (
-                <div
-                  key={`${message.role}-${index}`}
-                  className={`max-w-[90%] rounded-md px-3 py-2 text-sm ${
-                    message.role === "assistant"
-                      ? "bg-white border border-gray-200 text-gray-800"
-                      : "ml-auto bg-[var(--blue-primary)] text-white"
-                  }`}
-                >
-                  {message.content}
-                </div>
-              ))}
-              {isSending && (
-                <div className="max-w-[90%] rounded-md px-3 py-2 text-sm bg-white border border-gray-200 text-gray-500">
-                  Thinking...
-                </div>
-              )}
-              <div ref={chatEndRef} />
-            </div>
-
-            <form onSubmit={handleSendMessage} className="mt-4 space-y-3">
-              <textarea
-                ref={composerRef}
-                autoFocus
-                value={pendingMessage}
-                onChange={(event) => setPendingMessage(event.target.value)}
-                onKeyDown={handleComposerKeyDown}
-                placeholder="Describe your NDA details in your own words..."
-                className="w-full p-3 border border-gray-300 rounded-md h-24 text-gray-900"
-                disabled={isSending}
-              />
-              <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-gray-500">Press Enter to send. Use Shift+Enter for a new line.</p>
-                <button
-                  type="submit"
-                  className="px-5 py-2.5 bg-[var(--purple-secondary)] text-white rounded hover:opacity-90 font-semibold text-sm disabled:opacity-60 shadow-sm"
-                  disabled={isSending || !pendingMessage.trim()}
-                  aria-label="Send message"
-                >
-                  {isSending ? "Sending..." : "Send"}
-                </button>
-                {activeModel && (
-                  <p className="text-xs text-gray-500 text-right">Model: {activeModel}</p>
-                )}
-              </div>
-            </form>
-
-            <div className="mt-4 border-t border-gray-200 pt-3 text-sm text-gray-700 space-y-1">
-              <p>
-                Selected document: {selectedDocument || "Not selected yet"}
-              </p>
-              <p>Status: {isReadyForDraft ? "Ready for draft" : "Collecting details"}</p>
-              <p>Missing fields: {missingFields.length}</p>
-              {!isDocumentSupported && suggestedClosestDocument && (
-                <p className="text-amber-700">
-                  Unsupported request detected. Suggested closest option: {suggestedClosestDocument}
-                </p>
-              )}
-              {availableDocuments.length > 0 && (
-                <p className="text-xs text-gray-600">
-                  Supported: {availableDocuments.join(", ")}
-                </p>
-              )}
-              {chatError && <p className="text-red-600">Error: {chatError}</p>}
-            </div>
+      <div className="mx-auto grid w-full max-w-7xl gap-6 lg:grid-cols-[320px_1fr_1fr]">
+        <aside className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold uppercase tracking-wide text-slate-500">History</h2>
+            <button
+              onClick={() => void fetchSavedDocuments()}
+              className="text-xs font-medium text-sky-700 hover:text-sky-900"
+              type="button"
+            >
+              Refresh
+            </button>
           </div>
 
-          <div className="bg-white p-6 rounded-lg shadow">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-xl font-semibold text-gray-900">Draft Preview</h2>
+          <p className="mb-3 text-xs text-slate-500">
+            Saved drafts for your account. Database resets when server restarts.
+          </p>
+
+          {isHistoryLoading && <p className="text-xs text-slate-500">Loading history...</p>}
+          {!isHistoryLoading && savedDocuments.length === 0 && (
+            <p className="text-xs text-slate-500">No saved drafts yet.</p>
+          )}
+
+          <div className="space-y-2">
+            {savedDocuments.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => void loadSavedDocument(item.id)}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-left transition hover:border-slate-300 hover:bg-white"
+              >
+                <p className="text-xs font-semibold text-slate-800">{item.selectedDocument}</p>
+                <p className="mt-1 text-[11px] text-slate-500">{item.createdAt}</p>
+              </button>
+            ))}
+          </div>
+
+          {historyError && <p className="mt-3 text-xs text-rose-600">{historyError}</p>}
+        </aside>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="mb-4">
+            <h3 className="text-xl font-semibold text-slate-900">AI Intake Chat</h3>
+            <p className="text-sm text-slate-600">
+              Provide business details and Prelegal will prepare a template-driven draft.
+            </p>
+          </div>
+
+          <div className="h-[420px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3">
+            {chatMessages.map((message, index) => (
+              <div
+                key={`${message.role}-${index}`}
+                className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${
+                  message.role === "assistant"
+                    ? "border border-slate-200 bg-white text-slate-800"
+                    : "ml-auto bg-[var(--blue-primary)] text-white"
+                }`}
+              >
+                {message.content}
+              </div>
+            ))}
+            {isSending && (
+              <div className="max-w-[90%] rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-500">
+                Thinking...
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          <form onSubmit={handleSendMessage} className="mt-4 space-y-3">
+            <textarea
+              ref={composerRef}
+              autoFocus
+              value={pendingMessage}
+              onChange={(event) => setPendingMessage(event.target.value)}
+              onKeyDown={handleComposerKeyDown}
+              placeholder="Describe your agreement needs or answer the latest question..."
+              className="h-24 w-full rounded-xl border border-slate-300 p-3 text-sm text-slate-900 outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-200"
+              disabled={isSending}
+            />
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500">Enter sends. Shift+Enter creates a new line.</p>
+              <button
+                type="submit"
+                className="rounded-xl bg-[var(--purple-secondary)] px-5 py-2.5 text-sm font-semibold text-white hover:opacity-90 disabled:opacity-60"
+                disabled={isSending || !pendingMessage.trim()}
+                aria-label="Send message"
+              >
+                {isSending ? "Sending..." : "Send"}
+              </button>
+            </div>
+          </form>
+
+          <div className="mt-4 border-t border-slate-200 pt-3 text-sm text-slate-700">
+            <p>Selected document: {selectedDocument || "Not selected yet"}</p>
+            <p>Status: {isReadyForDraft ? "Ready for draft" : "Collecting details"}</p>
+            <p>Missing fields: {missingFields.length}</p>
+            {!isDocumentSupported && suggestedClosestDocument && (
+              <p className="text-amber-700">
+                Unsupported request detected. Suggested closest option: {suggestedClosestDocument}
+              </p>
+            )}
+            {availableDocuments.length > 0 && (
+              <p className="text-xs text-slate-600">Supported: {availableDocuments.join(", ")}</p>
+            )}
+            {chatError && <p className="text-rose-600">Error: {chatError}</p>}
+            {activeModel && <p className="text-xs text-slate-500">Model: {activeModel}</p>}
+          </div>
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-slate-900">Draft Preview</h2>
+            <div className="flex gap-2">
+              <button
+                onClick={() => void handleSaveDraft()}
+                className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50"
+                disabled={!draftMarkdown || !selectedDocument || isSavingDocument}
+              >
+                {isSavingDocument ? "Saving..." : "Save draft"}
+              </button>
               <button
                 onClick={handleDownloadDraft}
-                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 font-medium text-sm"
+                className="rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
                 disabled={!draftMarkdown}
               >
                 Download PDF
               </button>
             </div>
-            <div className="bg-white border border-gray-200 rounded p-4 h-[640px] overflow-y-auto">
-              {draftMarkdown ? (
-                <article className="text-sm text-gray-800 space-y-2 leading-relaxed">
-                  <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    rehypePlugins={[rehypeRaw]}
-                    components={{
-                      h1: ({ children }) => <h1 className="text-xl font-bold text-gray-900 mt-2">{children}</h1>,
-                      h2: ({ children }) => <h2 className="text-lg font-semibold text-gray-900 mt-4">{children}</h2>,
-                      h3: ({ children }) => <h3 className="text-base font-semibold text-gray-900 mt-3">{children}</h3>,
-                      p: ({ children }) => <p className="text-sm text-gray-800">{children}</p>,
-                      table: ({ children }) => (
-                        <table className="w-full border-separate border-spacing-y-2">{children}</table>
-                      ),
-                      tbody: ({ children }) => <tbody>{children}</tbody>,
-                      tr: ({ children }) => <tr>{children}</tr>,
-                      td: ({ children }) => (
-                        <td className="align-top first:pr-8 first:w-[36%] first:font-medium first:text-gray-600">{children}</td>
-                      ),
-                      li: ({ children }) => <li className="ml-5 list-disc text-sm text-gray-800">{children}</li>,
-                      code: ({ children }) => (
-                        <code className="bg-gray-100 px-1 py-0.5 rounded text-xs text-gray-900">{children}</code>
-                      ),
-                    }}
-                  >
-                    {normalizedDraftMarkdown}
-                  </ReactMarkdown>
-                </article>
-              ) : (
-                <p className="text-sm text-gray-500">
-                  Your generated draft will appear here after AI identifies the document type and collects enough details.
-                </p>
-              )}
-            </div>
           </div>
-        </div>
+
+          <div className="h-[640px] overflow-y-auto rounded-xl border border-slate-200 bg-white p-4">
+            {draftMarkdown ? (
+              <article className="space-y-2 text-sm leading-relaxed text-slate-800">
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeRaw]}
+                  components={{
+                    h1: ({ children }) => (
+                      <h1 className="mt-2 text-xl font-bold text-slate-900">{children}</h1>
+                    ),
+                    h2: ({ children }) => (
+                      <h2 className="mt-4 text-lg font-semibold text-slate-900">{children}</h2>
+                    ),
+                    h3: ({ children }) => (
+                      <h3 className="mt-3 text-base font-semibold text-slate-900">{children}</h3>
+                    ),
+                    p: ({ children }) => <p className="text-sm text-slate-800">{children}</p>,
+                    table: ({ children }) => (
+                      <table className="w-full border-separate border-spacing-y-2">{children}</table>
+                    ),
+                    tbody: ({ children }) => <tbody>{children}</tbody>,
+                    tr: ({ children }) => <tr>{children}</tr>,
+                    td: ({ children }) => (
+                      <td className="align-top first:w-[36%] first:pr-8 first:font-medium first:text-slate-600">
+                        {children}
+                      </td>
+                    ),
+                    li: ({ children }) => <li className="ml-5 list-disc text-sm text-slate-800">{children}</li>,
+                    code: ({ children }) => (
+                      <code className="rounded bg-slate-100 px-1 py-0.5 text-xs text-slate-900">{children}</code>
+                    ),
+                  }}
+                >
+                  {normalizedDraftMarkdown}
+                </ReactMarkdown>
+              </article>
+            ) : (
+              <p className="text-sm text-slate-500">
+                Your generated draft will appear here after AI identifies the document type and collects enough details.
+              </p>
+            )}
+          </div>
+
+          <p className="mt-3 text-xs text-slate-500">
+            Legal disclaimer: This draft is informational and must be reviewed by a licensed attorney before use.
+          </p>
+        </section>
       </div>
     </main>
   );

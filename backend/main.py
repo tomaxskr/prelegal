@@ -5,16 +5,23 @@ import json
 import os
 import re
 import sqlite3
+import secrets
+import hashlib
+import hmac
 from difflib import get_close_matches
+from datetime import datetime, timezone
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Literal
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-DATABASE_PATH = os.environ.get("DATABASE_PATH", "/data/prelegal.db")
+DATABASE_PATH = os.environ.get(
+    "DATABASE_PATH",
+    str(Path(__file__).resolve().parent / "prelegal.db"),
+)
 STATIC_DIR = os.environ.get("STATIC_DIR", "static")
 
 
@@ -188,15 +195,41 @@ def init_db():
     db_dir = os.path.dirname(DATABASE_PATH)
     if db_dir:
         os.makedirs(db_dir, exist_ok=True)
+
+    # Keep the DB intentionally ephemeral for local prototype use.
+    if os.path.isfile(DATABASE_PATH):
+        os.remove(DATABASE_PATH)
+
     conn = sqlite3.connect(DATABASE_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+        CREATE TABLE users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT UNIQUE NOT NULL,
             name TEXT NOT NULL,
             password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            token TEXT UNIQUE NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            selected_document TEXT NOT NULL,
+            collected_fields_json TEXT NOT NULL,
+            draft_markdown TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
     conn.commit()
@@ -223,9 +256,258 @@ app.add_middleware(
 )
 
 
+class SignUpRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
+class SignInRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: dict
+
+
+class SaveDocumentRequest(BaseModel):
+    selectedDocument: str
+    collectedFields: dict[str, str] = Field(default_factory=dict)
+    draftMarkdown: str
+
+
+class SavedDocumentSummary(BaseModel):
+    id: int
+    selectedDocument: str
+    createdAt: str
+
+
+class SavedDocumentDetail(BaseModel):
+    id: int
+    selectedDocument: str
+    collectedFields: dict[str, str] = Field(default_factory=dict)
+    draftMarkdown: str
+    createdAt: str
+
+
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy"}
+
+
+@app.post("/api/auth/signup", response_model=AuthResponse)
+async def auth_signup(request: SignUpRequest):
+    name = request.name.strip()
+    email = normalize_email(request.email)
+    password = request.password
+
+    if len(name) < 2:
+        raise HTTPException(status_code=400, detail="Name must be at least 2 characters")
+    if "@" not in email or len(email) < 5:
+        raise HTTPException(status_code=400, detail="Please provide a valid email")
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+
+    salt = secrets.token_hex(16)
+    password_hash = hash_password(password, salt)
+    token = secrets.token_urlsafe(32)
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO users (email, name, password_hash, password_salt)
+            VALUES (?, ?, ?, ?)
+            """,
+            (email, name, password_hash, salt),
+        )
+        user_id = cursor.lastrowid
+        cursor.execute(
+            "INSERT INTO sessions (user_id, token) VALUES (?, ?)",
+            (user_id, token),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        raise HTTPException(status_code=409, detail="An account with that email already exists")
+    finally:
+        conn.close()
+
+    return AuthResponse(
+        token=token,
+        user={"id": int(user_id), "name": name, "email": email},
+    )
+
+
+@app.post("/api/auth/signin", response_model=AuthResponse)
+async def auth_signin(request: SignInRequest):
+    email = normalize_email(request.email)
+    password = request.password
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT id, email, name, password_hash, password_salt FROM users WHERE email = ?",
+        (email,),
+    )
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    if not verify_password(password, str(row["password_salt"]), str(row["password_hash"])):
+        conn.close()
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    token = secrets.token_urlsafe(32)
+    cursor.execute("INSERT INTO sessions (user_id, token) VALUES (?, ?)", (int(row["id"]), token))
+    conn.commit()
+    conn.close()
+
+    return AuthResponse(
+        token=token,
+        user={
+            "id": int(row["id"]),
+            "name": str(row["name"]),
+            "email": str(row["email"]),
+        },
+    )
+
+
+@app.get("/api/auth/me")
+async def auth_me(authorization: str | None = Header(default=None)):
+    user = require_user_from_auth_header(authorization)
+    return {"user": user}
+
+
+@app.post("/api/auth/signout")
+async def auth_signout(authorization: str | None = Header(default=None)):
+    token = parse_bearer_token(authorization)
+    if not token:
+        return {"ok": True}
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM sessions WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/documents", response_model=SavedDocumentDetail)
+async def save_document(
+    request: SaveDocumentRequest,
+    authorization: str | None = Header(default=None),
+):
+    user = require_user_from_auth_header(authorization)
+
+    selected_document = normalize_document_choice(request.selectedDocument)
+    if not selected_document:
+        raise HTTPException(status_code=400, detail="selectedDocument is invalid or unsupported")
+
+    draft_markdown = request.draftMarkdown.strip()
+    if not draft_markdown:
+        raise HTTPException(status_code=400, detail="draftMarkdown cannot be empty")
+
+    serialized_fields = json.dumps(request.collectedFields)
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO documents (user_id, selected_document, collected_fields_json, draft_markdown)
+        VALUES (?, ?, ?, ?)
+        """,
+        (user["id"], selected_document, serialized_fields, draft_markdown),
+    )
+    document_id = int(cursor.lastrowid)
+    conn.commit()
+    conn.close()
+
+    return SavedDocumentDetail(
+        id=document_id,
+        selectedDocument=selected_document,
+        collectedFields=request.collectedFields,
+        draftMarkdown=draft_markdown,
+        createdAt=utc_now_iso(),
+    )
+
+
+@app.get("/api/documents", response_model=list[SavedDocumentSummary])
+async def list_documents(authorization: str | None = Header(default=None)):
+    user = require_user_from_auth_header(authorization)
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, selected_document, created_at
+        FROM documents
+        WHERE user_id = ?
+        ORDER BY id DESC
+        """,
+        (user["id"],),
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    result: list[SavedDocumentSummary] = []
+    for row in rows:
+        result.append(
+            SavedDocumentSummary(
+                id=int(row["id"]),
+                selectedDocument=str(row["selected_document"]),
+                createdAt=str(row["created_at"]),
+            )
+        )
+    return result
+
+
+@app.get("/api/documents/{document_id}", response_model=SavedDocumentDetail)
+async def get_document(document_id: int, authorization: str | None = Header(default=None)):
+    user = require_user_from_auth_header(authorization)
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT id, selected_document, collected_fields_json, draft_markdown, created_at
+        FROM documents
+        WHERE id = ? AND user_id = ?
+        """,
+        (document_id, user["id"]),
+    )
+    row = cursor.fetchone()
+    conn.close()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    collected_fields: dict[str, str] = {}
+    raw_collected = row["collected_fields_json"]
+    if raw_collected:
+        try:
+            loaded = json.loads(str(raw_collected))
+            if isinstance(loaded, dict):
+                collected_fields = {str(key): str(value) for key, value in loaded.items()}
+        except json.JSONDecodeError:
+            collected_fields = {}
+
+    return SavedDocumentDetail(
+        id=int(row["id"]),
+        selectedDocument=str(row["selected_document"]),
+        collectedFields=collected_fields,
+        draftMarkdown=str(row["draft_markdown"]),
+        createdAt=str(row["created_at"]),
+    )
 
 
 class ChatRequest(BaseModel):
@@ -310,6 +592,74 @@ class DocumentChatSessionResponse(BaseModel):
     draftMarkdown: str = ""
     availableDocuments: list[str] = Field(default_factory=list)
     model: str
+
+
+def normalize_email(raw_email: str) -> str:
+    return raw_email.strip().lower()
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        120_000,
+    ).hex()
+
+
+def verify_password(password: str, salt: str, expected_hash: str) -> bool:
+    candidate = hash_password(password, salt)
+    return hmac.compare_digest(candidate, expected_hash)
+
+
+def parse_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    parts = authorization.strip().split(" ", 1)
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        return None
+    token = parts[1].strip()
+    return token or None
+
+
+def get_user_from_token(token: str | None) -> dict | None:
+    if not token:
+        return None
+
+    conn = sqlite3.connect(DATABASE_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT users.id, users.email, users.name
+        FROM sessions
+        JOIN users ON users.id = sessions.user_id
+        WHERE sessions.token = ?
+        """,
+        (token,),
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return None
+
+    return {
+        "id": int(row["id"]),
+        "email": str(row["email"]),
+        "name": str(row["name"]),
+    }
+
+
+def require_user_from_auth_header(authorization: str | None) -> dict:
+    token = parse_bearer_token(authorization)
+    user = get_user_from_token(token)
+    if not user:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    return user
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def suggest_closest_document(requested_document: str | None) -> str | None:
@@ -623,7 +973,7 @@ async def complete_document_chat(
     fallback_models = [
         request.model,
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-        "openrouter/google/gemma-3-27b-it:free",
+        "openrouter/google/gemma-4-31b-it:free",
     ]
     model_candidates = list(dict.fromkeys(fallback_models))
 
@@ -769,7 +1119,7 @@ async def complete_nda_chat(request: NDAChatSessionRequest) -> tuple[NDAChatStru
     fallback_models = [
         request.model,
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-        "openrouter/google/gemma-3-27b-it:free",
+        "openrouter/google/gemma-4-31b-it:free",
     ]
     model_candidates = list(dict.fromkeys(fallback_models))
 
